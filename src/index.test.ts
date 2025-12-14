@@ -1,23 +1,24 @@
 import {test, expect} from 'vitest';
-import {multiply, sum} from './index';
+import {
+	getSupDir, getSocketPath, getStatusPath, getLogsDir, getLogPath,
+} from './index.js';
 
-test('adds positive numbers', () => {
-	expect(sum(1, 3)).toBe(4);
-	expect(sum(10001, 1345)).toBe(11346);
+test('getSupDir returns .sup directory', () => {
+	expect(getSupDir('/home/user/project')).toBe('/home/user/project/.sup');
 });
 
-test('adds negative numbers', () => {
-	expect(sum(-1, -3)).toBe(-4);
-	expect(sum(-10001, -1345)).toBe(-11346);
+test('getSocketPath returns socket path', () => {
+	expect(getSocketPath('/home/user/project')).toBe('/home/user/project/.sup/sup.sock');
 });
 
-test('adds a negative and positive number', () => {
-	expect(sum(1, -3)).toBe(-2);
-	expect(sum(-10001, 1345)).toBe(-8656);
+test('getStatusPath returns status file path', () => {
+	expect(getStatusPath('/home/user/project')).toBe('/home/user/project/.sup/status.json');
 });
 
-test('multiplies positive numbers', () => {
-	expect(multiply(1, 3)).toBe(3);
-	expect(multiply(2, 3)).toBe(6);
-	expect(multiply(10001, 1345)).toBe(13451345);
+test('getLogsDir returns logs directory', () => {
+	expect(getLogsDir('/home/user/project')).toBe('/home/user/project/.sup/logs');
+});
+
+test('getLogPath returns log file path for service', () => {
+	expect(getLogPath('web', '/home/user/project')).toBe('/home/user/project/.sup/logs/web.log');
 });

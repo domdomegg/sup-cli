@@ -1,15 +1,20 @@
 {
-  "name": "typescript-library-template",
+  "name": "sup-cli",
   "version": "0.0.0",
-  "description": "Template for creating TypeScript libraries",
+  "description": "Simple process supervisor with socket-based control. Start, stop, and monitor multiple services.",
   "license": "MIT",
   "author": "Adam Jones (domdomegg)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/domdomegg/typescript-library-template.git"
+    "url": "git@github.com:domdomegg/sup-cli.git"
   },
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "sup": "./dist/cli.js",
+    "sup-cli": "./dist/cli.js"
+  },
   "files": [
     "dist"
   ],
@@ -21,8 +26,12 @@
     "build": "tsc --project tsconfig.build.json",
     "prepublishOnly": "npm run clean && npm run build"
   },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
   "devDependencies": {
     "@tsconfig/node-lts": "^22.0.2",
+    "@types/node": "^22.10.2",
     "eslint": "^9.32.0",
     "eslint-config-domdomegg": "^2.0.9",
     "tsconfig-domdomegg": "^1.0.0",

@@ -86,6 +86,27 @@ async function cmdUp() {
 		unlinkSync(socketPath);
 	}
 
+	// Always clean up any orphan processes on configured ports before starting
+	try {
+		const config = await loadConfig();
+		let cleaned = false;
+		for (const svc of config.services) {
+			const hc = svc.healthCheck;
+			if (hc?.type === 'port') {
+				if (killPort(hc.port, svc.name)) {
+					cleaned = true;
+				}
+			}
+		}
+
+		if (cleaned) {
+			console.log('Cleaned up orphan processes');
+			await sleep(500); // Give ports time to release
+		}
+	} catch {
+		// Config might not load, that's ok
+	}
+
 	// Ensure .sup directory exists for daemon log
 	const supDir = getSupDir();
 	mkdirSync(supDir, {recursive: true});
@@ -356,7 +377,7 @@ async function cmdKill() {
 	console.log('Done. Safe to run "sup up"');
 }
 
-function killPort(port: number, name: string) {
+function killPort(port: number, name: string): boolean {
 	try {
 		const pids = execSync(`lsof -t -i:${port} -sTCP:LISTEN 2>/dev/null`, {encoding: 'utf-8'}).trim();
 		if (pids) {
@@ -364,10 +385,14 @@ function killPort(port: number, name: string) {
 				process.kill(parseInt(pid), 'SIGKILL');
 				console.log(`  Killed ${name} (pid ${pid}) on port ${port}`);
 			}
+
+			return true;
 		}
 	} catch {
 		// No process on port
 	}
+
+	return false;
 }
 
 function printHelp() {

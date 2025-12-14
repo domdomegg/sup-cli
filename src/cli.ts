@@ -2,9 +2,9 @@
 /* eslint-disable no-await-in-loop */
 
 import {spawn, execSync} from 'child_process';
-import {existsSync, readFileSync} from 'fs';
+import {existsSync, readFileSync, readdirSync} from 'fs';
 import {
-	loadConfig, getSocketPath, getStatusPath, getLogPath,
+	loadConfig, getSocketPath, getStatusPath, getLogPath, getLogsDir,
 } from './config.js';
 import {startDaemon} from './daemon.js';
 import {Client} from './client.js';
@@ -63,36 +63,37 @@ async function main() {
 }
 
 async function cmdUp() {
-	const daemonize = subArgs.includes('-d') || subArgs.includes('--daemon');
-	const config = await loadConfig();
-
-	if (daemonize) {
-		// Fork a detached process
-		const scriptPath = process.argv[1];
-		if (!scriptPath) {
-			throw new Error('Could not determine script path');
-		}
-
-		const child = spawn(process.execPath, [scriptPath, '_daemon'], {
-			detached: true,
-			stdio: 'ignore',
-			cwd: process.cwd(),
-		});
-		child.unref();
-		console.log(`Daemon started in background (pid ${child.pid})`);
-
-		// Wait briefly for socket to appear
-		await sleep(1000);
-
-		if (existsSync(getSocketPath())) {
-			console.log('Daemon is ready');
-		} else {
-			console.log('Daemon starting... check status with "sup status"');
-		}
-	} else {
-		// Foreground mode
-		await startDaemon(config);
+	// Always run as daemon
+	const scriptPath = process.argv[1];
+	if (!scriptPath) {
+		throw new Error('Could not determine script path');
 	}
+
+	// Check if already running
+	const client = new Client();
+	if (client.isRunning()) {
+		console.log('Daemon already running. Use "sup down" to stop it first.');
+		return;
+	}
+
+	const child = spawn(process.execPath, [scriptPath, '_daemon'], {
+		detached: true,
+		stdio: 'ignore',
+		cwd: process.cwd(),
+	});
+	child.unref();
+	console.log(`Daemon started (pid ${child.pid})`);
+
+	// Wait for socket to appear
+	for (let i = 0; i < 10; i++) {
+		await sleep(500);
+		if (existsSync(getSocketPath())) {
+			console.log('Daemon ready');
+			return;
+		}
+	}
+
+	console.log('Daemon starting... check "sup status"');
 }
 
 async function cmdDown() {
@@ -243,28 +244,47 @@ async function cmdRestart() {
 }
 
 async function cmdLogs() {
-	const service = subArgs[0];
+	const service = subArgs.find((a) => !a.startsWith('-'));
 	const follow = subArgs.includes('-f') || subArgs.includes('--follow');
+	const lines = subArgs.find((a) => /^-n\d+$/.exec(a))?.slice(2) ?? '50';
 
-	if (!service) {
-		console.error('Usage: sup logs <service> [-f]');
-		process.exit(1);
-	}
+	if (service) {
+		// Single service logs
+		const logPath = getLogPath(service);
+		if (!existsSync(logPath)) {
+			console.error(`No logs for ${service}`);
+			process.exit(1);
+		}
 
-	const logPath = getLogPath(service);
-
-	if (!existsSync(logPath)) {
-		console.error(`No logs for ${service}`);
-		process.exit(1);
-	}
-
-	if (follow) {
-		// Use tail -f
-		spawn('tail', ['-f', logPath], {stdio: 'inherit'});
+		if (follow) {
+			spawn('tail', ['-f', logPath], {stdio: 'inherit'});
+		} else {
+			spawn('tail', [`-${lines}`, logPath], {stdio: 'inherit'});
+		}
 	} else {
-		// Show last 50 lines
-		const lines = subArgs.find((a) => /^-n\d+$/.exec(a))?.slice(2) ?? '50';
-		spawn('tail', [`-${lines}`, logPath], {stdio: 'inherit'});
+		// All logs - tail all log files with prefix
+		const logsDir = getLogsDir();
+		if (!existsSync(logsDir)) {
+			console.error('No logs directory found');
+			process.exit(1);
+		}
+
+		const logFiles = readdirSync(logsDir)
+			.filter((f) => f.endsWith('.log'))
+			.map((f) => getLogPath(f.replace('.log', '')));
+
+		if (logFiles.length === 0) {
+			console.error('No log files found');
+			process.exit(1);
+		}
+
+		if (follow) {
+			// Use tail -f on all files with --prefix for service names
+			spawn('tail', ['-f', ...logFiles], {stdio: 'inherit'});
+		} else {
+			// Show last N lines from each file
+			spawn('tail', [`-n${lines}`, ...logFiles], {stdio: 'inherit'});
+		}
 	}
 }
 
@@ -319,21 +339,20 @@ sup - Simple process supervisor
 Usage: sup <command> [options]
 
 Commands:
-  up [-d]           Start all services (use -d to daemonize)
+  up                Start daemon and all services
   down              Stop daemon and all services
   status            Show service status
-  start [service]   Start a service (or all if not specified)
-  stop [service]    Stop a service (or all if not specified)
-  restart [service] Restart a service (or all if not specified)
-  logs <service>    View logs (-f to follow)
+  start [service]   Start a service (or all)
+  stop [service]    Stop a service (or all)
+  restart [service] Restart a service (or all)
+  logs [service]    View logs (-f to follow, -n50 for line count)
   kill              Force kill all processes (cleanup)
-  help              Show this help
 
 Examples:
-  sup up            Start all services in foreground
-  sup up -d         Start as background daemon
+  sup up            Start everything
   sup status        Check what's running
   sup restart web   Restart the web service
+  sup logs          View all logs
   sup logs api -f   Follow API logs
   sup kill          Clean up after crash
 `);

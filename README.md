@@ -1,127 +1,172 @@
 # sup-cli
 
-Simple process supervisor with socket-based control. Start, stop, and monitor multiple services.
+Simple process supervisor for local development. Manages multiple services with health checks, auto-restart, and unified logging.
 
-## Features
-
-- Socket-based daemon with CLI client
-- Health checks (port or HTTP)
-- Auto-restart on failure with exponential backoff
-- Dependency ordering between services
-- File-based status and logs (Claude-friendly)
-- Watch mode for live reload
-- dotenv support
-
-## Installation
+## Quick Start
 
 ```bash
-npm install -g sup-cli
+npm install sup-cli
 ```
 
-## Usage
-
-Create a `sup.config.ts` (or `.js`, `.json`) in your project:
+Create `sup.config.ts`:
 
 ```typescript
-import type { Config } from 'sup-cli';
+import type {Config} from 'sup-cli';
 
 export default {
   services: [
-    {
-      name: 'web',
-      command: 'npm run start:web',
-      healthCheck: { type: 'port', port: 3000 },
-    },
-    {
-      name: 'api',
-      command: 'npm run start:api',
-      healthCheck: { type: 'http', url: 'http://localhost:4000/health' },
-      dependsOn: ['db'],
-    },
-    {
-      name: 'db',
-      command: 'docker run postgres',
-      healthCheck: { type: 'port', port: 5432 },
-    },
+    { name: 'web', command: 'npm run dev', healthCheck: { type: 'port', port: 3000 } },
+    { name: 'api', command: 'npm run api', healthCheck: { type: 'port', port: 4000 } },
   ],
 } satisfies Config;
 ```
 
-Then run:
+Start everything:
 
 ```bash
-sup up        # Start all services (foreground)
-sup up -d     # Start as daemon (background)
-sup down      # Stop daemon
-sup status    # Show service status
-sup logs web  # View logs for a service
-sup restart api  # Restart a service
-sup kill      # Force kill everything (cleanup)
+npx sup up
 ```
 
-## Configuration
+## Common Operations
 
-### Service options
+```bash
+# Start/stop
+sup up              # Start all services (runs as daemon)
+sup down            # Stop everything
 
-| Option | Type | Description |
-|--------|------|-------------|
-| `name` | string | Service name (required) |
-| `command` | string | Command to run (required) |
-| `cwd` | string | Working directory |
-| `env` | object | Environment variables |
-| `healthCheck` | object | Health check config |
-| `dependsOn` | string[] | Services to wait for before starting |
-| `restartPolicy` | 'always' \| 'on-failure' \| 'never' | When to restart (default: 'on-failure') |
-| `maxRestarts` | number | Max restart attempts (default: 10) |
-| `watch` | string[] | Glob patterns to watch for live reload |
+# Check status
+sup status          # See what's running, health, restarts
 
-### Health check types
+# Restart services
+sup restart         # Restart all
+sup restart web     # Restart just web
 
-```typescript
-// Port check - service is healthy when port is listening
-{ type: 'port', port: 3000 }
+# View logs
+sup logs            # All logs
+sup logs web        # Just web logs
+sup logs -f         # Follow all logs
+sup logs web -f     # Follow web logs
+sup logs -n100      # Last 100 lines
 
-// HTTP check - service is healthy when URL returns 2xx
-{ type: 'http', url: 'http://localhost:3000/health' }
-
-// No health check - consider healthy immediately
-{ type: 'none' }
+# Debugging
+sup kill            # Force kill everything (useful after crashes)
 ```
 
-## File-based status
+## Dev Workflow
 
-Status is written to `.sup/status.json`:
+If your services don't already auto-reload (e.g., via nodemon, Next.js, Vite), you'll need to restart manually:
+
+```bash
+# Terminal 1: Start everything
+sup up
+sup logs -f         # Watch all logs
+
+# Terminal 2: Work on code
+# ... edit files ...
+sup restart web     # Restart after changes
+
+# When done
+sup down
+```
+
+Add scripts to your `package.json`:
 
 ```json
 {
-  "daemon": { "pid": 12345, "startedAt": "2024-12-14T12:00:00Z" },
-  "services": {
-    "web": { "status": "healthy", "pid": 12346, "restarts": 0 },
-    "api": { "status": "starting", "pid": 12347, "restarts": 0 }
+  "scripts": {
+    "start": "sup down; sup up",
+    "stop": "sup down",
+    "logs": "sup logs -f"
   }
 }
 ```
 
-Logs are written to `.sup/logs/{service}.log`.
+## Configuration
 
-This makes it easy for AI assistants (like Claude) to read status and debug issues.
+### Service Options
+
+```typescript
+type ServiceConfig = {
+  name: string;           // Service name
+  command: string;        // Command to run
+  cwd?: string;           // Working directory
+  env?: Record<string, string>;  // Environment variables
+  healthCheck?: HealthCheck;     // How to check if healthy
+  dependsOn?: string[];   // Wait for these services first
+  restartPolicy?: 'always' | 'on-failure' | 'never';  // Default: 'on-failure'
+  maxRestarts?: number;   // Give up after N restarts (default: 10)
+};
+```
+
+### Health Checks
+
+```typescript
+// Port check - healthy when port is listening
+{ type: 'port', port: 3000 }
+
+// HTTP check - healthy when URL returns 2xx
+{ type: 'http', url: 'http://localhost:3000/health' }
+
+// No check - always considered healthy
+{ type: 'none' }
+```
+
+### Environment Variables
+
+Load from `.env` automatically, or specify a custom path:
+
+```typescript
+export default {
+  dotenv: '.env.local',  // Optional, defaults to .env
+  services: [...]
+} satisfies Config;
+```
+
+### Dependencies
+
+Services start in dependency order:
+
+```typescript
+services: [
+  { name: 'db', command: 'docker run postgres', healthCheck: { type: 'port', port: 5432 } },
+  { name: 'api', command: 'npm run api', dependsOn: ['db'] },  // Waits for db to be healthy
+  { name: 'web', command: 'npm run web', dependsOn: ['api'] }, // Waits for api
+]
+```
+
+## Files
+
+sup creates a `.sup/` directory (add to `.gitignore`):
+
+```
+.sup/
+├── sup.sock      # Unix socket for CLI communication
+├── status.json   # Current status (readable by scripts/AI)
+└── logs/
+    ├── web.log
+    └── api.log
+```
+
+The `status.json` is designed to be easily readable by scripts or AI assistants:
+
+```json
+{
+  "daemon": { "pid": 12345 },
+  "services": {
+    "web": { "status": "healthy", "pid": 12346, "restarts": 0 },
+    "api": { "status": "healthy", "pid": 12347, "restarts": 0 }
+  }
+}
+```
 
 ## Contributing
 
-Pull requests are welcomed on GitHub! To get started:
+Pull requests welcome! To develop:
 
-1. Install Git and Node.js
-2. Clone the repository
-3. Install dependencies with `npm install`
-4. Run `npm run test` to run tests
-5. Build with `npm run build`
-
-## Releases
-
-Versions follow the [semantic versioning spec](https://semver.org/).
-
-To release:
-
-1. Use `npm version <major | minor | patch>` to bump the version
-2. Run `git push --follow-tags` to push with tags
-3. Wait for GitHub Actions to publish to the NPM registry.
+```bash
+git clone https://github.com/domdomegg/sup-cli
+cd sup-cli
+npm install
+npm test
+npm run build
+```

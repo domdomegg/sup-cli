@@ -147,6 +147,27 @@ export class Daemon {
 		}
 	}
 
+	private killPort(port: number): void {
+		try {
+			const pids = execSync(`lsof -t -i:${port} -sTCP:LISTEN 2>/dev/null`, {encoding: 'utf-8'}).trim();
+			if (pids) {
+				for (const pid of pids.split('\n')) {
+					try {
+						process.kill(parseInt(pid), 'SIGKILL');
+						console.log(`Killed orphan process on port ${port} (pid ${pid})`);
+					} catch {
+						// Process may have already exited
+					}
+				}
+
+				// Brief wait for port to be released
+				execSync('sleep 0.5');
+			}
+		} catch {
+			// No process on port
+		}
+	}
+
 	private async startSocketServer(): Promise<void> {
 		const socketPath = getSocketPath(this.cwd);
 
@@ -295,6 +316,12 @@ export class Daemon {
 			for (const dep of config.dependsOn) {
 				await this.waitForHealthy(dep);
 			}
+		}
+
+		// If service has a port health check, make sure the port is free
+		const hc = config.healthCheck;
+		if (hc?.type === 'port') {
+			this.killPort(hc.port);
 		}
 
 		// Create log stream

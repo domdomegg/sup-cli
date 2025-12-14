@@ -10,17 +10,46 @@ export class Client {
 		this.socketPath = getSocketPath(cwd);
 	}
 
-	isRunning(): boolean {
+	/** Check if socket file exists (quick check, may be stale) */
+	socketExists(): boolean {
 		return existsSync(this.socketPath);
 	}
 
-	async send(cmd: Command): Promise<Response> {
-		return new Promise((resolve, reject) => {
-			if (!this.isRunning()) {
-				resolve({ok: false, error: 'Daemon not running. Use "sup up" to start.'});
-				return;
-			}
+	/** Actually try to connect to verify daemon is alive */
+	async isRunning(): Promise<boolean> {
+		if (!this.socketExists()) {
+			return false;
+		}
 
+		// Try to connect to verify it's alive
+		return new Promise((resolve) => {
+			const socket = new Socket();
+			socket.setTimeout(1000);
+
+			socket.on('connect', () => {
+				socket.destroy();
+				resolve(true);
+			});
+
+			socket.on('error', () => {
+				resolve(false);
+			});
+
+			socket.on('timeout', () => {
+				socket.destroy();
+				resolve(false);
+			});
+
+			socket.connect(this.socketPath);
+		});
+	}
+
+	async send(cmd: Command): Promise<Response> {
+		if (!this.socketExists()) {
+			return {ok: false, error: 'Daemon not running. Use "sup up" to start.'};
+		}
+
+		return new Promise((resolve, reject) => {
 			const socket = new Socket();
 			let buffer = '';
 

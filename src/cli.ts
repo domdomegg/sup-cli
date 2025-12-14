@@ -2,9 +2,11 @@
 /* eslint-disable no-await-in-loop */
 
 import {spawn, execSync} from 'child_process';
-import {existsSync, readFileSync, readdirSync} from 'fs';
 import {
-	loadConfig, getSocketPath, getStatusPath, getLogPath, getLogsDir,
+	existsSync, readFileSync, readdirSync, unlinkSync, mkdirSync, openSync,
+} from 'fs';
+import {
+	loadConfig, getSocketPath, getStatusPath, getLogPath, getLogsDir, getSupDir,
 } from './config.js';
 import {startDaemon} from './daemon.js';
 import {Client} from './client.js';
@@ -63,34 +65,58 @@ async function main() {
 }
 
 async function cmdUp() {
-	// Always run as daemon
 	const scriptPath = process.argv[1];
 	if (!scriptPath) {
 		throw new Error('Could not determine script path');
 	}
 
-	// Check if already running
 	const client = new Client();
-	if (client.isRunning()) {
-		console.log('Daemon already running. Use "sup down" to stop it first.');
-		return;
+	const socketPath = getSocketPath();
+
+	// Check if daemon is actually running (not just stale socket)
+	if (client.socketExists()) {
+		const alive = await client.isRunning();
+		if (alive) {
+			console.log('Daemon already running. Use "sup down" to stop it first.');
+			return;
+		}
+
+		// Stale socket - clean it up
+		console.log('Cleaning up stale socket...');
+		unlinkSync(socketPath);
 	}
+
+	// Ensure .sup directory exists for daemon log
+	const supDir = getSupDir();
+	mkdirSync(supDir, {recursive: true});
+	const logsDir = getLogsDir();
+	mkdirSync(logsDir, {recursive: true});
+
+	// Log daemon output to a file so we can debug crashes
+	const daemonLogPath = `${supDir}/daemon.log`;
+	const logFd = openSync(daemonLogPath, 'a');
 
 	const child = spawn(process.execPath, [scriptPath, '_daemon'], {
 		detached: true,
-		stdio: 'ignore',
+		stdio: ['ignore', logFd, logFd],
 		cwd: process.cwd(),
 	});
 	child.unref();
 	console.log(`Daemon started (pid ${child.pid})`);
 
-	// Wait for socket to appear
-	for (let i = 0; i < 10; i++) {
-		await sleep(500);
-		if (existsSync(getSocketPath())) {
+	// Wait for socket to appear and verify connection
+	for (let i = 0; i < 20; i++) {
+		await sleep(250);
+		if (await client.isRunning()) {
 			console.log('Daemon ready');
 			return;
 		}
+	}
+
+	// Check if daemon crashed
+	if (!client.socketExists()) {
+		console.error('Daemon failed to start. Check .sup/daemon.log for errors.');
+		process.exit(1);
 	}
 
 	console.log('Daemon starting... check "sup status"');
@@ -98,7 +124,12 @@ async function cmdUp() {
 
 async function cmdDown() {
 	const client = new Client();
-	if (!client.isRunning()) {
+	if (!await client.isRunning()) {
+		// Clean up stale socket if it exists
+		if (client.socketExists()) {
+			unlinkSync(getSocketPath());
+		}
+
 		console.log('Daemon not running');
 		return;
 	}
@@ -125,7 +156,7 @@ async function cmdStatus() {
 	const client = new Client();
 	let status: StatusFile | null = null;
 
-	if (client.isRunning()) {
+	if (await client.isRunning()) {
 		status = await client.status();
 	} else {
 		// Fall back to status file
@@ -193,7 +224,7 @@ async function cmdStart() {
 	const service = subArgs[0];
 	const client = new Client();
 
-	if (!client.isRunning()) {
+	if (!await client.isRunning()) {
 		console.error('Daemon not running. Use "sup up" first.');
 		process.exit(1);
 	}
@@ -211,7 +242,7 @@ async function cmdStop() {
 	const service = subArgs[0];
 	const client = new Client();
 
-	if (!client.isRunning()) {
+	if (!await client.isRunning()) {
 		console.log('Daemon not running');
 		return;
 	}
@@ -229,7 +260,7 @@ async function cmdRestart() {
 	const service = subArgs[0];
 	const client = new Client();
 
-	if (!client.isRunning()) {
+	if (!await client.isRunning()) {
 		console.error('Daemon not running. Use "sup up" first.');
 		process.exit(1);
 	}
@@ -291,17 +322,24 @@ async function cmdLogs() {
 async function cmdKill() {
 	console.log('Force killing all processes...');
 
-	// Kill daemon if running
+	// Try graceful shutdown first
 	const client = new Client();
-	if (client.isRunning()) {
+	if (client.socketExists()) {
 		try {
 			await client.down();
+			await sleep(1000);
 		} catch {
 			// Ignore errors
 		}
 	}
 
-	// Load config to get ports
+	// Clean up socket if it exists
+	const socketPath = getSocketPath();
+	if (existsSync(socketPath)) {
+		unlinkSync(socketPath);
+	}
+
+	// Load config to get ports and kill anything on them
 	try {
 		const config = await loadConfig();
 

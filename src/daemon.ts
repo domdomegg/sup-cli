@@ -175,6 +175,15 @@ export class Daemon {
 			this.server = createServer((socket) => {
 				let buffer = '';
 
+				// Handle socket errors (e.g., client disconnects)
+				socket.on('error', (err) => {
+					// EPIPE, ECONNRESET are normal when client disconnects
+					if ((err as NodeJS.ErrnoException).code !== 'EPIPE'
+						&& (err as NodeJS.ErrnoException).code !== 'ECONNRESET') {
+						console.error('Socket error:', err.message);
+					}
+				});
+
 				socket.on('data', async (data) => {
 					buffer += data.toString();
 					const lines = buffer.split('\n');
@@ -185,10 +194,14 @@ export class Daemon {
 							try {
 								const cmd = JSON.parse(line) as Command;
 								const response = await this.handleCommand(cmd);
-								socket.write(`${JSON.stringify(response)}\n`);
+								if (!socket.destroyed) {
+									socket.write(`${JSON.stringify(response)}\n`);
+								}
 							} catch (err) {
-								const response: Response = {ok: false, error: String(err)};
-								socket.write(`${JSON.stringify(response)}\n`);
+								if (!socket.destroyed) {
+									const response: Response = {ok: false, error: String(err)};
+									socket.write(`${JSON.stringify(response)}\n`);
+								}
 							}
 						}
 					}

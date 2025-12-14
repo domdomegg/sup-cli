@@ -281,9 +281,10 @@ async function cmdRestart() {
 	const service = subArgs[0];
 	const client = new Client();
 
+	// If daemon not running, start it
 	if (!await client.isRunning()) {
-		console.error('Daemon not running. Use "sup up" first.');
-		process.exit(1);
+		await cmdUp();
+		return;
 	}
 
 	const res = await client.restart(service);

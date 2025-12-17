@@ -14,9 +14,12 @@ Create `sup.config.ts`:
 import type {Config} from 'sup-cli';
 
 export default {
+  tasks: [
+    { name: 'migrate', command: 'npm run migrate' },
+  ],
   services: [
-    { name: 'web', command: 'npm run dev', healthCheck: { type: 'port', port: 3000 } },
-    { name: 'api', command: 'npm run api', healthCheck: { type: 'port', port: 4000 } },
+    { name: 'web', command: 'npm run dev', healthCheck: { type: 'port', port: 3000 }, dependsOn: ['migrate'] },
+    { name: 'api', command: 'npm run api', healthCheck: { type: 'port', port: 4000 }, dependsOn: ['migrate'] },
   ],
 } satisfies Config;
 ```
@@ -83,6 +86,25 @@ Add scripts to your `package.json`:
 
 ## Configuration
 
+### Tasks vs Services
+
+- **Tasks** run once and exit. Use them for setup steps like database migrations, installing dependencies, or build steps.
+- **Services** run continuously and are restarted if they crash. Use them for your actual application processes.
+
+Both tasks and services can depend on each other. Services will wait for their task dependencies to complete before starting.
+
+### Task Options
+
+```typescript
+type TaskConfig = {
+  name: string;           // Task name
+  command: string;        // Command to run
+  cwd?: string;           // Working directory
+  env?: Record<string, string>;  // Environment variables
+  dependsOn?: string[];   // Wait for these tasks/services first
+};
+```
+
 ### Service Options
 
 ```typescript
@@ -92,7 +114,7 @@ type ServiceConfig = {
   cwd?: string;           // Working directory
   env?: Record<string, string>;  // Environment variables
   healthCheck?: HealthCheck;     // How to check if healthy
-  dependsOn?: string[];   // Wait for these services first
+  dependsOn?: string[];   // Wait for these tasks/services first
   restartPolicy?: 'always' | 'on-failure' | 'never';  // Default: 'on-failure'
   maxRestarts?: number;   // Give up after N restarts (default: 10)
 };

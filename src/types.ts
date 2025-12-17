@@ -10,13 +10,22 @@ export type ServiceConfig = {
 	watch?: string[];
 };
 
+export type TaskConfig = {
+	name: string;
+	command: string;
+	cwd?: string;
+	env?: Record<string, string>;
+	dependsOn?: string[];
+};
+
 export type HealthCheck =
 	| {type: 'http'; url: string}
 	| {type: 'port'; port: number}
 	| {type: 'none'};
 
 export type Config = {
-	services: ServiceConfig[];
+	services?: ServiceConfig[];
+	tasks?: TaskConfig[];
 	dotenv?: string; // Path to .env file (default: .env in cwd)
 };
 
@@ -30,6 +39,17 @@ export type ServiceState = {
 	startedAt?: string;
 };
 
+export type TaskStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+export type TaskState = {
+	status: TaskStatus;
+	pid: number | null;
+	exitCode?: number;
+	lastError?: string;
+	startedAt?: string;
+	completedAt?: string;
+};
+
 export type DaemonState = {
 	pid: number;
 	startedAt: string;
@@ -40,6 +60,7 @@ export type StatusFile = {
 	updatedAt: string;
 	daemon: DaemonState | null;
 	services: Record<string, ServiceState>;
+	tasks: Record<string, TaskState>;
 };
 
 // Socket protocol

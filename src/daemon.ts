@@ -7,7 +7,7 @@ import {
 import {writeFile, unlink} from 'fs/promises';
 import {config as loadDotenv} from 'dotenv';
 import type {
-	Config, ServiceConfig, ServiceState, StatusFile, Command, Response,
+	Config, ServiceConfig, TaskConfig, ServiceState, TaskState, StatusFile, Command, Response,
 } from './types.js';
 import {
 	getSocketPath, getStatusPath, getLogsDir, getLogPath, getSupDir,
@@ -24,8 +24,16 @@ type ManagedService = {
 	logStream: WriteStream | null;
 };
 
+type ManagedTask = {
+	config: TaskConfig;
+	process: ChildProcess | null;
+	state: TaskState;
+	logStream: WriteStream | null;
+};
+
 export class Daemon {
 	private readonly services = new Map<string, ManagedService>();
+	private readonly tasks = new Map<string, ManagedTask>();
 	private server: Server | null = null;
 	private healthCheckInterval: NodeJS.Timeout | null = null;
 	private statusWriteInterval: NodeJS.Timeout | null = null;
@@ -38,8 +46,18 @@ export class Daemon {
 	) {
 		this.startedAt = new Date().toISOString();
 
+		// Initialize task states
+		for (const task of config.tasks ?? []) {
+			this.tasks.set(task.name, {
+				config: task,
+				process: null,
+				state: {status: 'pending', pid: null},
+				logStream: null,
+			});
+		}
+
 		// Initialize service states
-		for (const svc of config.services) {
+		for (const svc of config.services ?? []) {
 			this.services.set(svc.name, {
 				config: svc,
 				process: null,
@@ -124,7 +142,7 @@ export class Daemon {
 	private async checkPortConflicts(): Promise<void> {
 		const conflicts: string[] = [];
 
-		for (const svc of this.config.services) {
+		for (const svc of this.config.services ?? []) {
 			const hc = svc.healthCheck;
 			if (hc?.type === 'port') {
 				if (this.isPortInUse(hc.port)) {
@@ -222,7 +240,12 @@ export class Daemon {
 
 			case 'start':
 				if (cmd.service) {
-					await this.startService(cmd.service);
+					// Check if it's a task or service
+					if (this.tasks.has(cmd.service)) {
+						await this.runTask(cmd.service);
+					} else {
+						await this.startService(cmd.service);
+					}
 				} else {
 					await this.startAllServices();
 				}
@@ -269,11 +292,15 @@ export class Daemon {
 	}
 
 	private async startAllServices(): Promise<void> {
-		// Topological sort by dependencies
+		// Topological sort by dependencies (includes both tasks and services)
 		const sorted = this.topoSort();
 
 		for (const name of sorted) {
-			await this.startService(name);
+			if (this.tasks.has(name)) {
+				await this.runTask(name);
+			} else {
+				await this.startService(name);
+			}
 		}
 	}
 
@@ -292,11 +319,14 @@ export class Daemon {
 			}
 
 			visiting.add(name);
+
+			// Get dependencies from either task or service
+			const task = this.tasks.get(name);
 			const svc = this.services.get(name);
-			if (svc?.config.dependsOn) {
-				for (const dep of svc.config.dependsOn) {
-					visit(dep);
-				}
+			const deps = task?.config.dependsOn ?? svc?.config.dependsOn ?? [];
+
+			for (const dep of deps) {
+				visit(dep);
 			}
 
 			visiting.delete(name);
@@ -304,11 +334,106 @@ export class Daemon {
 			result.push(name);
 		};
 
+		// Visit all tasks first (they may be dependencies)
+		for (const name of this.tasks.keys()) {
+			visit(name);
+		}
+
+		// Then visit all services
 		for (const name of this.services.keys()) {
 			visit(name);
 		}
 
 		return result;
+	}
+
+	private async runTask(name: string): Promise<void> {
+		const managed = this.tasks.get(name);
+		if (!managed) {
+			throw new Error(`Unknown task: ${name}`);
+		}
+
+		// Skip if already completed or failed
+		if (managed.state.status === 'completed' || managed.state.status === 'failed') {
+			return;
+		}
+
+		// Skip if already running
+		if (managed.process) {
+			// Wait for it to complete
+			await this.waitForReady(name);
+			return;
+		}
+
+		const {config} = managed;
+
+		// Wait for dependencies
+		if (config.dependsOn) {
+			for (const dep of config.dependsOn) {
+				await this.waitForReady(dep);
+			}
+		}
+
+		// Create log stream
+		const logPath = getLogPath(name, this.cwd);
+		managed.logStream = createWriteStream(logPath, {flags: 'a'});
+
+		// Resolve cwd
+		const taskCwd = config.cwd?.replace(/^~/, process.env.HOME ?? '') ?? this.cwd;
+
+		console.log(`Running task ${name}...`);
+		managed.state.status = 'running';
+		managed.state.startedAt = new Date().toISOString();
+
+		// Spawn process and wait for it to complete
+		await new Promise<void>((resolve, reject) => {
+			const proc = spawn(config.command, {
+				shell: true,
+				cwd: taskCwd,
+				env: {...process.env, ...config.env},
+				stdio: ['ignore', 'pipe', 'pipe'],
+			});
+
+			managed.process = proc;
+			managed.state.pid = proc.pid ?? null;
+
+			// Pipe output to log
+			const logLine = (prefix: string) => (data: Buffer) => {
+				const timestamp = new Date().toISOString();
+				const lines = data.toString().split('\n');
+				for (const line of lines) {
+					if (line) {
+						managed.logStream?.write(`[${timestamp}]${prefix} ${line}\n`);
+					}
+				}
+			};
+
+			proc.stdout?.on('data', logLine(''));
+			proc.stderr?.on('data', logLine(' [ERR]'));
+
+			proc.on('exit', (code) => {
+				managed.process = null;
+				managed.state.pid = null;
+				if (code !== null) {
+					managed.state.exitCode = code;
+				}
+
+				managed.state.completedAt = new Date().toISOString();
+				managed.logStream?.end();
+				managed.logStream = null;
+
+				if (code === 0) {
+					managed.state.status = 'completed';
+					console.log(`Task ${name} completed`);
+					resolve();
+				} else {
+					managed.state.status = 'failed';
+					managed.state.lastError = `Exit code ${code}`;
+					console.error(`Task ${name} failed (exit code ${code})`);
+					reject(new Error(`Task ${name} failed with exit code ${code}`));
+				}
+			});
+		});
 	}
 
 	private async startService(name: string): Promise<void> {
@@ -327,7 +452,7 @@ export class Daemon {
 		// Wait for dependencies
 		if (config.dependsOn) {
 			for (const dep of config.dependsOn) {
-				await this.waitForHealthy(dep);
+				await this.waitForReady(dep);
 			}
 		}
 
@@ -378,10 +503,26 @@ export class Daemon {
 		console.log(`Started ${name} (pid ${proc.pid})`);
 	}
 
-	private async waitForHealthy(name: string, timeoutMs = 30000): Promise<void> {
+	private async waitForReady(name: string, timeoutMs = 30000): Promise<void> {
 		const start = Date.now();
 
 		while (Date.now() - start < timeoutMs) {
+			// Check if it's a task
+			const task = this.tasks.get(name);
+			if (task) {
+				if (task.state.status === 'completed') {
+					return;
+				}
+
+				if (task.state.status === 'failed') {
+					throw new Error(`Task ${name} failed`);
+				}
+
+				await sleep(500);
+				continue;
+			}
+
+			// It's a service
 			const managed = this.services.get(name);
 			if (managed?.state.status === 'healthy') {
 				return;
@@ -390,7 +531,7 @@ export class Daemon {
 			await sleep(500);
 		}
 
-		throw new Error(`Timeout waiting for ${name} to become healthy`);
+		throw new Error(`Timeout waiting for ${name} to become ready`);
 	}
 
 	private handleExit(name: string, code: number | null): void {
@@ -526,6 +667,11 @@ export class Daemon {
 			services[name] = {...managed.state};
 		}
 
+		const tasks: Record<string, TaskState> = {};
+		for (const [name, managed] of this.tasks) {
+			tasks[name] = {...managed.state};
+		}
+
 		return {
 			updatedAt: new Date().toISOString(),
 			daemon: {
@@ -534,6 +680,7 @@ export class Daemon {
 				socket: getSocketPath(this.cwd),
 			},
 			services,
+			tasks,
 		};
 	}
 

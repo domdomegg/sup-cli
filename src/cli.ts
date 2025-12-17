@@ -90,7 +90,7 @@ async function cmdUp() {
 	try {
 		const config = await loadConfig();
 		let cleaned = false;
-		for (const svc of config.services) {
+		for (const svc of config.services ?? []) {
 			const hc = svc.healthCheck;
 			if (hc?.type === 'port') {
 				if (killPort(hc.port, svc.name)) {
@@ -206,28 +206,48 @@ async function cmdStatus() {
 
 	console.log();
 
+	// Print tasks table
+	const tasks = Object.entries(status.tasks ?? {});
+	if (tasks.length > 0) {
+		console.log('Tasks:');
+		console.log('─'.repeat(60));
+
+		const maxTaskNameLen = Math.max(...tasks.map(([n]) => n.length));
+
+		for (const [name, state] of tasks) {
+			const statusIcon = getStatusIcon(state.status);
+			const error = state.lastError ? `[${state.lastError}]` : '';
+
+			console.log(`  ${statusIcon} ${name.padEnd(maxTaskNameLen)}  ${state.status.padEnd(10)} ${error}`);
+		}
+
+		console.log();
+	}
+
 	// Print service table
 	const services = Object.entries(status.services);
-	if (services.length === 0) {
-		console.log('No services configured');
+	if (services.length === 0 && tasks.length === 0) {
+		console.log('No services or tasks configured');
 		return;
 	}
 
-	console.log('Services:');
-	console.log('─'.repeat(60));
+	if (services.length > 0) {
+		console.log('Services:');
+		console.log('─'.repeat(60));
 
-	const maxNameLen = Math.max(...services.map(([n]) => n.length));
+		const maxNameLen = Math.max(...services.map(([n]) => n.length));
 
-	for (const [name, state] of services) {
-		const statusIcon = getStatusIcon(state.status);
-		const pid = state.pid ? `pid:${state.pid}` : '';
-		const restarts = state.restarts > 0 ? `(${state.restarts} restarts)` : '';
-		const error = state.lastError ? `[${state.lastError}]` : '';
+		for (const [name, state] of services) {
+			const statusIcon = getStatusIcon(state.status);
+			const pid = state.pid ? `pid:${state.pid}` : '';
+			const restarts = state.restarts > 0 ? `(${state.restarts} restarts)` : '';
+			const error = state.lastError ? `[${state.lastError}]` : '';
 
-		console.log(`  ${statusIcon} ${name.padEnd(maxNameLen)}  ${state.status.padEnd(10)} ${pid.padEnd(12)} ${restarts} ${error}`);
+			console.log(`  ${statusIcon} ${name.padEnd(maxNameLen)}  ${state.status.padEnd(10)} ${pid.padEnd(12)} ${restarts} ${error}`);
+		}
+
+		console.log();
 	}
-
-	console.log();
 }
 
 function getStatusIcon(status: string): string {
@@ -237,6 +257,10 @@ function getStatusIcon(status: string): string {
 		case 'unhealthy': return '○';
 		case 'stopped': return '■';
 		case 'crashed': return '✗';
+		case 'completed': return '✓';
+		case 'running': return '◐';
+		case 'failed': return '✗';
+		case 'pending': return '○';
 		default: return '?';
 	}
 }
@@ -365,7 +389,7 @@ async function cmdKill() {
 	try {
 		const config = await loadConfig();
 
-		for (const svc of config.services) {
+		for (const svc of config.services ?? []) {
 			const hc = svc.healthCheck;
 			if (hc?.type === 'port') {
 				killPort(hc.port, svc.name);

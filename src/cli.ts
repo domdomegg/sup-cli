@@ -448,6 +448,7 @@ Examples:
 
 // Internal command for daemonization
 if (command === '_daemon') {
+	process.title = 'sup-daemon';
 	loadConfig().then(startDaemon).catch((err: unknown) => {
 		console.error(err);
 		process.exit(1);

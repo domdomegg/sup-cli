@@ -192,3 +192,13 @@ npm install
 npm test
 npm run build
 ```
+
+## Releases
+
+Versions follow the [semantic versioning spec](https://semver.org/).
+
+To release:
+
+1. Use `npm version <major | minor | patch>` to bump the version
+2. Run `git push --follow-tags` to push with tags
+3. Wait for GitHub Actions to publish to the NPM registry.

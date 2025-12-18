@@ -43,6 +43,7 @@ export class Daemon {
 	constructor(
 		private readonly config: Config,
 		private readonly cwd: string = process.cwd(),
+		private readonly onlyService?: string,
 	) {
 		this.startedAt = new Date().toISOString();
 
@@ -110,8 +111,8 @@ export class Daemon {
 		process.on('SIGTERM', async () => this.shutdown());
 		process.on('SIGINT', async () => this.shutdown());
 
-		// Start all services
-		await this.startAllServices();
+		// Start services (all, or just the specified one with its dependencies)
+		await this.startAllServices(this.onlyService);
 
 		console.log(`Daemon started (pid ${process.pid})`);
 	}
@@ -291,9 +292,16 @@ export class Daemon {
 		}
 	}
 
-	private async startAllServices(): Promise<void> {
+	private async startAllServices(onlyTarget?: string): Promise<void> {
 		// Topological sort by dependencies (includes both tasks and services)
-		const sorted = this.topoSort();
+		let sorted = this.topoSort();
+
+		// If targeting a specific service, filter to only it and its dependencies
+		if (onlyTarget) {
+			const needed = this.getTransitiveDeps(onlyTarget);
+			needed.add(onlyTarget);
+			sorted = sorted.filter((name) => needed.has(name));
+		}
 
 		for (const name of sorted) {
 			if (this.tasks.has(name)) {
@@ -302,6 +310,24 @@ export class Daemon {
 				await this.startService(name);
 			}
 		}
+	}
+
+	private getTransitiveDeps(name: string): Set<string> {
+		const result = new Set<string>();
+		const visit = (n: string) => {
+			const task = this.tasks.get(n);
+			const svc = this.services.get(n);
+			const deps = task?.config.dependsOn ?? svc?.config.dependsOn ?? [];
+			for (const dep of deps) {
+				if (!result.has(dep)) {
+					result.add(dep);
+					visit(dep);
+				}
+			}
+		};
+
+		visit(name);
+		return result;
 	}
 
 	private topoSort(): string[] {
@@ -730,8 +756,8 @@ export class Daemon {
 	}
 }
 
-export async function startDaemon(config: Config, cwd?: string): Promise<void> {
-	const daemon = new Daemon(config, cwd);
+export async function startDaemon(config: Config, cwd?: string, onlyService?: string): Promise<void> {
+	const daemon = new Daemon(config, cwd, onlyService);
 	await daemon.start();
 
 	// Keep process alive - empty executor is intentional

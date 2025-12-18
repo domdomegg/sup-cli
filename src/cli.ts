@@ -32,9 +32,6 @@ async function main() {
 			case 'status':
 				await cmdStatus();
 				break;
-			case 'start':
-				await cmdStart();
-				break;
 			case 'stop':
 				await cmdStop();
 				break;
@@ -73,10 +70,25 @@ async function cmdUp() {
 	const client = new Client();
 	const socketPath = getSocketPath();
 
+	const serviceArg = subArgs[0];
+
 	// Check if daemon is actually running (not just stale socket)
 	if (client.socketExists()) {
 		const alive = await client.isRunning();
 		if (alive) {
+			// Daemon running - if service specified, start just that service
+			if (serviceArg) {
+				const res = await client.start(serviceArg);
+				if (res.ok) {
+					console.log(`Started ${serviceArg}`);
+				} else {
+					console.error(`Failed: ${res.error}`);
+					process.exit(1);
+				}
+
+				return;
+			}
+
 			console.log('Daemon already running. Use "sup down" to stop it first.');
 			return;
 		}
@@ -117,7 +129,8 @@ async function cmdUp() {
 	const daemonLogPath = `${supDir}/daemon.log`;
 	const logFd = openSync(daemonLogPath, 'a');
 
-	const child = spawn(process.execPath, [scriptPath, '_daemon'], {
+	const daemonArgs = serviceArg ? [scriptPath, '_daemon', serviceArg] : [scriptPath, '_daemon'];
+	const child = spawn(process.execPath, daemonArgs, {
 		detached: true,
 		stdio: ['ignore', logFd, logFd],
 		cwd: process.cwd(),
@@ -265,24 +278,6 @@ function getStatusIcon(status: string): string {
 	}
 }
 
-async function cmdStart() {
-	const service = subArgs[0];
-	const client = new Client();
-
-	if (!await client.isRunning()) {
-		console.error('Daemon not running. Use "sup up" first.');
-		process.exit(1);
-	}
-
-	const res = await client.start(service);
-	if (res.ok) {
-		console.log(service ? `Started ${service}` : 'Started all services');
-	} else {
-		console.error(`Failed: ${res.error}`);
-		process.exit(1);
-	}
-}
-
 async function cmdStop() {
 	const service = subArgs[0];
 	const client = new Client();
@@ -427,18 +422,18 @@ sup - Simple process supervisor
 Usage: sup <command> [options]
 
 Commands:
-  up                Start daemon and all services
-  down              Stop daemon and all services
   status            Show service status
-  start [service]   Start a service (or all)
+  up [service]      Start daemon (and service, or all services if none specified)
   stop [service]    Stop a service (or all)
   restart [service] Restart a service (or all)
   logs [service]    View logs (-f to follow, -n50 for line count)
+  down              Stop daemon and all services
   kill              Force kill all processes (cleanup)
 
 Examples:
-  sup up            Start everything
   sup status        Check what's running
+  sup up            Start everything
+  sup up web        Start just web (and its dependencies)
   sup restart web   Restart the web service
   sup logs          View all logs
   sup logs api -f   Follow API logs
@@ -449,7 +444,8 @@ Examples:
 // Internal command for daemonization
 if (command === '_daemon') {
 	process.title = 'sup-daemon';
-	loadConfig().then(startDaemon).catch((err: unknown) => {
+	const onlyService = subArgs[0]; // Optional: only start this service
+	loadConfig().then(async (config) => startDaemon(config, process.cwd(), onlyService)).catch((err: unknown) => {
 		console.error(err);
 		process.exit(1);
 	});

@@ -320,6 +320,8 @@ async function cmdLogs() {
 	const follow = subArgs.includes('-f') || subArgs.includes('--follow');
 	const lines = subArgs.find((a) => /^-n\d+$/.exec(a))?.slice(2) ?? '50';
 
+	const timestamp = `=== Logs fetched at ${new Date().toISOString()} ===`;
+
 	if (service) {
 		// Single service logs
 		const logPath = getLogPath(service);
@@ -329,9 +331,13 @@ async function cmdLogs() {
 		}
 
 		if (follow) {
+			console.log(timestamp);
 			spawn('tail', ['-f', logPath], {stdio: 'inherit'});
 		} else {
-			spawn('tail', [`-${lines}`, logPath], {stdio: 'inherit'});
+			const proc = spawn('tail', [`-${lines}`, logPath], {stdio: 'inherit'});
+			proc.on('close', () => {
+				console.log(timestamp);
+			});
 		}
 	} else {
 		// All logs - tail all log files with prefix
@@ -352,10 +358,14 @@ async function cmdLogs() {
 
 		if (follow) {
 			// Use tail -f on all files with --prefix for service names
+			console.log(timestamp);
 			spawn('tail', ['-f', ...logFiles], {stdio: 'inherit'});
 		} else {
 			// Show last N lines from each file
-			spawn('tail', [`-n${lines}`, ...logFiles], {stdio: 'inherit'});
+			const proc = spawn('tail', [`-n${lines}`, ...logFiles], {stdio: 'inherit'});
+			proc.on('close', () => {
+				console.log(timestamp);
+			});
 		}
 	}
 }

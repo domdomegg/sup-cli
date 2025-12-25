@@ -1,6 +1,6 @@
 {
   "name": "sup-cli",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Simple process supervisor with socket-based control. Start, stop, and monitor multiple services.",
   "license": "MIT",
   "author": "Adam Jones (domdomegg)",

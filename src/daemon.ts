@@ -2,7 +2,7 @@
 import {spawn, type ChildProcess, execSync} from 'child_process';
 import {createServer, type Server, Socket} from 'net';
 import {
-	createWriteStream, existsSync, mkdirSync, readFileSync, type WriteStream,
+	createWriteStream, existsSync, mkdirSync, readFileSync, unlinkSync, type WriteStream,
 } from 'fs';
 import {writeFile, unlink} from 'fs/promises';
 import {config as loadDotenv} from 'dotenv';
@@ -110,6 +110,17 @@ export class Daemon {
 		// Set up signal handlers
 		process.on('SIGTERM', async () => this.shutdown());
 		process.on('SIGINT', async () => this.shutdown());
+
+		// Set up crash handlers to kill children on unexpected exit
+		process.on('uncaughtException', (err) => {
+			this.emergencyKillChildren('uncaughtException', err);
+			process.exit(1);
+		});
+		process.on('unhandledRejection', (reason) => {
+			const err = reason instanceof Error ? reason : new Error(String(reason));
+			this.emergencyKillChildren('unhandledRejection', err);
+			process.exit(1);
+		});
 
 		// Start services (all, or just the specified one with its dependencies)
 		await this.startAllServices(this.onlyService);
@@ -437,6 +448,19 @@ export class Daemon {
 			proc.stdout?.on('data', logLine(''));
 			proc.stderr?.on('data', logLine(' [ERR]'));
 
+			proc.on('error', (err) => {
+				// Handle spawn errors (e.g., invalid cwd, command not found)
+				managed.process = null;
+				managed.state.pid = null;
+				managed.state.status = 'failed';
+				managed.state.lastError = err.message;
+				managed.state.completedAt = new Date().toISOString();
+				managed.logStream?.end();
+				managed.logStream = null;
+				console.error(`Task ${name} failed to start: ${err.message}`);
+				reject(new Error(`Task ${name} failed to start: ${err.message}`));
+			});
+
 			proc.on('exit', (code) => {
 				managed.process = null;
 				managed.state.pid = null;
@@ -521,6 +545,13 @@ export class Daemon {
 
 		proc.stdout?.on('data', logLine(''));
 		proc.stderr?.on('data', logLine(' [ERR]'));
+
+		proc.on('error', (err) => {
+			// Handle spawn errors (e.g., invalid cwd, command not found)
+			console.error(`${name} failed to start: ${err.message}`);
+			managed.state.lastError = err.message;
+			this.handleExit(name, 1);
+		});
 
 		proc.on('exit', (code) => {
 			this.handleExit(name, code);
@@ -714,6 +745,50 @@ export class Daemon {
 		const statusPath = getStatusPath(this.cwd);
 		const data = this.getStatusData();
 		await writeFile(statusPath, JSON.stringify(data, null, 2));
+	}
+
+	/** Synchronously kill all child processes - used during crash handling */
+	private emergencyKillChildren(type: 'uncaughtException' | 'unhandledRejection', err: Error): void {
+		console.error(`\n${'='.repeat(60)}`);
+		console.error(`[sup-cli] Fatal ${type}: ${err.message}`);
+		console.error(err.stack ?? '');
+		console.error('\nThis is a bug in sup-cli. Please report it at:');
+		console.error('https://github.com/domdomegg/sup-cli/issues/new');
+		console.error(`${'='.repeat(60)}`);
+
+		// Kill all service processes
+		for (const [name, managed] of this.services) {
+			if (managed.process?.pid) {
+				try {
+					process.kill(managed.process.pid, 'SIGKILL');
+					console.log(`Killed ${name} (pid ${managed.process.pid})`);
+				} catch {
+					// Process may have already exited
+				}
+			}
+		}
+
+		// Kill all task processes
+		for (const [name, managed] of this.tasks) {
+			if (managed.process?.pid) {
+				try {
+					process.kill(managed.process.pid, 'SIGKILL');
+					console.log(`Killed task ${name} (pid ${managed.process.pid})`);
+				} catch {
+					// Process may have already exited
+				}
+			}
+		}
+
+		// Clean up socket synchronously
+		const socketPath = getSocketPath(this.cwd);
+		if (existsSync(socketPath)) {
+			try {
+				unlinkSync(socketPath);
+			} catch {
+				// Ignore
+			}
+		}
 	}
 
 	private async shutdown(): Promise<void> {

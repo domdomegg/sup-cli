@@ -156,58 +156,130 @@ async function cmdUp() {
 	console.log('Daemon starting... check "sup status"');
 }
 
-async function cmdDown() {
-	const client = new Client();
-	if (!await client.isRunning()) {
-		// Clean up stale socket if it exists
-		if (client.socketExists()) {
-			unlinkSync(getSocketPath());
-		}
+function isPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0); // Signal 0 doesn't kill, just checks if process exists
+		return true;
+	} catch {
+		return false;
+	}
+}
 
+type DaemonCheckResult = {
+	isRunning: boolean;
+	socketConnected: boolean;
+	pid: number | null;
+	status: StatusFile | null;
+};
+
+async function checkDaemon(): Promise<DaemonCheckResult> {
+	const client = new Client();
+
+	// Try socket connection first
+	if (await client.isRunning()) {
+		const status = await client.status();
+		return {
+			isRunning: true,
+			socketConnected: true,
+			pid: status?.daemon?.pid ?? null,
+			status,
+		};
+	}
+
+	// Clean up stale socket if it exists
+	if (client.socketExists()) {
+		unlinkSync(getSocketPath());
+	}
+
+	// Fall back to status file to check for orphan daemon process
+	const statusPath = getStatusPath();
+	if (existsSync(statusPath)) {
+		try {
+			const status = JSON.parse(readFileSync(statusPath, 'utf-8')) as StatusFile;
+			if (status?.daemon?.pid && isPidAlive(status.daemon.pid)) {
+				// Daemon process exists but socket is gone - orphan state
+				return {
+					isRunning: true,
+					socketConnected: false,
+					pid: status.daemon.pid,
+					status,
+				};
+			}
+
+			// PID is dead, return stale status for display purposes
+			return {
+				isRunning: false,
+				socketConnected: false,
+				pid: null,
+				status: {...status, daemon: null},
+			};
+		} catch {
+			// Ignore parse errors
+		}
+	}
+
+	return {isRunning: false, socketConnected: false, pid: null, status: null};
+}
+
+async function cmdDown() {
+	const daemon = await checkDaemon();
+
+	if (!daemon.isRunning) {
 		console.log('Daemon not running');
 		return;
 	}
 
-	const res = await client.down();
-	if (res.ok) {
-		console.log('Daemon stopping...');
-		// Wait for socket to disappear
-
-		for (let i = 0; i < 10; i++) {
-			await sleep(500);
-			if (!existsSync(getSocketPath())) {
-				console.log('Daemon stopped');
-				return;
+	if (daemon.socketConnected) {
+		// Graceful shutdown via socket
+		const client = new Client();
+		const res = await client.down();
+		if (res.ok) {
+			console.log('Daemon stopping...');
+			for (let i = 0; i < 10; i++) {
+				await sleep(500);
+				if (!existsSync(getSocketPath())) {
+					console.log('Daemon stopped');
+					return;
+				}
 			}
+		} else {
+			console.error(`Failed: ${res.error}`);
 		}
-	} else {
-		console.error(`Failed: ${res.error}`);
+	} else if (daemon.pid) {
+		// Orphan daemon - kill directly
+		console.log(`Killing orphan daemon (pid ${daemon.pid})...`);
+		try {
+			process.kill(daemon.pid, 'SIGTERM');
+			await sleep(1000);
+			if (isPidAlive(daemon.pid)) {
+				process.kill(daemon.pid, 'SIGKILL');
+			}
+
+			console.log('Daemon stopped');
+		} catch (err) {
+			console.error(`Failed to kill daemon: ${err}`);
+		}
 	}
 }
 
 async function cmdStatus() {
-	// Try to read from daemon first
-	const client = new Client();
-	let status: StatusFile | null = null;
+	const daemon = await checkDaemon();
 
-	if (await client.isRunning()) {
-		status = await client.status();
-	} else {
-		// Fall back to status file
-		const statusPath = getStatusPath();
-		if (existsSync(statusPath)) {
-			try {
-				status = JSON.parse(readFileSync(statusPath, 'utf-8'));
-			} catch {
-				// Ignore parse errors
-			}
-		}
-	}
-
-	if (!status) {
+	if (!daemon.status) {
 		console.log('No status available. Daemon not running.');
 		return;
 	}
+
+	// If daemon not responding via socket, warn user
+	if (!daemon.socketConnected) {
+		if (daemon.isRunning) {
+			console.log('\n⚠️  Daemon running but socket not responding (use "sup down" to kill)\n');
+		} else {
+			console.log('\n⚠️  Status from cache (daemon not responding)\n');
+		}
+	}
+
+	const status = daemon.status;
 
 	// Print status
 	console.log();

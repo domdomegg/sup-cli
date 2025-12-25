@@ -13,10 +13,6 @@ import {
 	getSocketPath, getStatusPath, getLogsDir, getLogPath, getSupDir,
 } from './config.js';
 
-const sleep = async (ms: number) => new Promise<void>((resolve) => {
-	setTimeout(resolve, ms);
-});
-
 type ManagedService = {
 	config: ServiceConfig;
 	process: ChildProcess | null;
@@ -34,6 +30,7 @@ type ManagedTask = {
 export class Daemon {
 	private readonly services = new Map<string, ManagedService>();
 	private readonly tasks = new Map<string, ManagedTask>();
+	private readonly readyResolvers = new Map<string, ((failed?: boolean) => void)[]>();
 	private server: Server | null = null;
 	private healthCheckInterval: NodeJS.Timeout | null = null;
 	private statusWriteInterval: NodeJS.Timeout | null = null;
@@ -101,10 +98,10 @@ export class Daemon {
 		await this.startSocketServer();
 
 		// Start health check loop
-		this.healthCheckInterval = setInterval(async () => this.runHealthChecks(), 5000);
+		this.healthCheckInterval = setInterval(async () => this.runHealthChecks(), 500);
 
 		// Start status file writer
-		this.statusWriteInterval = setInterval(async () => this.writeStatus(), 2000);
+		this.statusWriteInterval = setInterval(async () => this.writeStatus(), 200);
 		await this.writeStatus();
 
 		// Set up signal handlers
@@ -458,6 +455,7 @@ export class Daemon {
 				managed.logStream?.end();
 				managed.logStream = null;
 				console.error(`Task ${name} failed to start: ${err.message}`);
+				this.notifyReady(name, true);
 				reject(new Error(`Task ${name} failed to start: ${err.message}`));
 			});
 
@@ -475,11 +473,13 @@ export class Daemon {
 				if (code === 0) {
 					managed.state.status = 'completed';
 					console.log(`Task ${name} completed`);
+					this.notifyReady(name);
 					resolve();
 				} else {
 					managed.state.status = 'failed';
 					managed.state.lastError = `Exit code ${code}`;
 					console.error(`Task ${name} failed (exit code ${code})`);
+					this.notifyReady(name, true);
 					reject(new Error(`Task ${name} failed with exit code ${code}`));
 				}
 			});
@@ -558,37 +558,71 @@ export class Daemon {
 		});
 
 		console.log(`Started ${name} (pid ${proc.pid})`);
+
+		// For type: 'none', immediately mark healthy
+		if (!hc || hc.type === 'none') {
+			managed.state.status = 'healthy';
+			this.notifyReady(name);
+		}
+	}
+
+	private notifyReady(name: string, failed = false): void {
+		const resolvers = this.readyResolvers.get(name);
+		if (resolvers) {
+			for (const resolve of resolvers) {
+				resolve(failed);
+			}
+
+			this.readyResolvers.delete(name);
+		}
 	}
 
 	private async waitForReady(name: string, timeoutMs = 30000): Promise<void> {
-		const start = Date.now();
-
-		while (Date.now() - start < timeoutMs) {
-			// Check if it's a task
-			const task = this.tasks.get(name);
-			if (task) {
-				if (task.state.status === 'completed') {
-					return;
-				}
-
-				if (task.state.status === 'failed') {
-					throw new Error(`Task ${name} failed`);
-				}
-
-				await sleep(500);
-				continue;
-			}
-
-			// It's a service
-			const managed = this.services.get(name);
-			if (managed?.state.status === 'healthy') {
+		// Check if already ready
+		const task = this.tasks.get(name);
+		if (task) {
+			if (task.state.status === 'completed') {
 				return;
 			}
 
-			await sleep(500);
+			if (task.state.status === 'failed') {
+				throw new Error(`Task ${name} failed`);
+			}
 		}
 
-		throw new Error(`Timeout waiting for ${name} to become ready`);
+		const managed = this.services.get(name);
+		if (managed?.state.status === 'healthy') {
+			return;
+		}
+
+		// Wait for notification
+		return new Promise((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				// Remove our resolver on timeout
+				const resolvers = this.readyResolvers.get(name);
+				if (resolvers) {
+					const idx = resolvers.indexOf(onReady);
+					if (idx >= 0) {
+						resolvers.splice(idx, 1);
+					}
+				}
+
+				reject(new Error(`Timeout waiting for ${name} to become ready`));
+			}, timeoutMs);
+
+			const onReady = (failed?: boolean) => {
+				clearTimeout(timeout);
+				if (failed) {
+					reject(new Error(`Task ${name} failed`));
+				} else {
+					resolve();
+				}
+			};
+
+			const resolvers = this.readyResolvers.get(name) ?? [];
+			resolvers.push(onReady);
+			this.readyResolvers.set(name, resolvers);
+		});
 	}
 
 	private handleExit(name: string, code: number | null): void {
@@ -630,7 +664,7 @@ export class Daemon {
 			return;
 		}
 
-		const delay = Math.min(1000 * (2 ** (managed.state.restarts - 1)), 30000);
+		const delay = Math.min(500 * (2 ** (managed.state.restarts - 1)), 10000);
 		console.log(`${name} exited (code ${code}), restarting in ${delay}ms (attempt ${managed.state.restarts})`);
 		managed.state.lastError = `Exit code ${code}`;
 
@@ -676,19 +710,27 @@ export class Daemon {
 	}
 
 	private async runHealthChecks(): Promise<void> {
-		for (const [, managed] of this.services) {
+		for (const [name, managed] of this.services) {
 			if (!managed.process) {
 				continue;
 			}
 
 			const hc = managed.config.healthCheck;
 			if (!hc || hc.type === 'none') {
-				managed.state.status = 'healthy';
+				if (managed.state.status !== 'healthy') {
+					managed.state.status = 'healthy';
+					this.notifyReady(name);
+				}
+
 				continue;
 			}
 
 			const healthy = await this.checkHealth(hc);
+			const wasHealthy = managed.state.status === 'healthy';
 			managed.state.status = healthy ? 'healthy' : 'unhealthy';
+			if (healthy && !wasHealthy) {
+				this.notifyReady(name);
+			}
 		}
 	}
 

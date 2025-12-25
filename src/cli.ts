@@ -139,12 +139,14 @@ async function cmdUp() {
 	console.log(`Daemon started (pid ${child.pid})`);
 
 	// Wait for socket to appear and verify connection
-	for (let i = 0; i < 20; i++) {
-		await sleep(250);
+	const pollInterval = 50;
+	for (let i = 0; i < 40; i++) {
 		if (await client.isRunning()) {
 			console.log('Daemon ready');
 			return;
 		}
+
+		await sleep(pollInterval);
 	}
 
 	// Check if daemon crashed
@@ -231,18 +233,21 @@ async function cmdDown() {
 		return;
 	}
 
+	const pollInterval = 50;
+
 	if (daemon.socketConnected) {
 		// Graceful shutdown via socket
 		const client = new Client();
 		const res = await client.down();
 		if (res.ok) {
 			console.log('Daemon stopping...');
-			for (let i = 0; i < 10; i++) {
-				await sleep(500);
+			for (let i = 0; i < 40; i++) {
 				if (!existsSync(getSocketPath())) {
 					console.log('Daemon stopped');
 					return;
 				}
+
+				await sleep(pollInterval);
 			}
 		} else {
 			console.error(`Failed to stop daemon: ${res.error}`);
@@ -252,7 +257,15 @@ async function cmdDown() {
 		console.log(`Killing orphan daemon (pid ${daemon.pid})...`);
 		try {
 			process.kill(daemon.pid, 'SIGTERM');
-			await sleep(1000);
+			// Wait for process to die
+			for (let i = 0; i < 20; i++) {
+				if (!isPidAlive(daemon.pid)) {
+					break;
+				}
+
+				await sleep(pollInterval);
+			}
+
 			if (isPidAlive(daemon.pid)) {
 				process.kill(daemon.pid, 'SIGKILL');
 			}
@@ -447,12 +460,21 @@ async function cmdLogs() {
 async function cmdKill() {
 	console.log('Force killing all processes...');
 
+	const pollInterval = 50;
+
 	// Try graceful shutdown first
 	const client = new Client();
 	if (client.socketExists()) {
 		try {
 			await client.down();
-			await sleep(1000);
+			// Wait briefly for graceful shutdown
+			for (let i = 0; i < 20; i++) {
+				if (!client.socketExists()) {
+					break;
+				}
+
+				await sleep(pollInterval);
+			}
 		} catch {
 			// Ignore errors
 		}

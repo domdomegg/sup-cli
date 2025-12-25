@@ -218,7 +218,9 @@ async function checkDaemon(): Promise<DaemonCheckResult> {
 		}
 	}
 
-	return {isRunning: false, socketConnected: false, pid: null, status: null};
+	return {
+		isRunning: false, socketConnected: false, pid: null, status: null,
+	};
 }
 
 async function cmdDown() {
@@ -243,7 +245,7 @@ async function cmdDown() {
 				}
 			}
 		} else {
-			console.error(`Failed: ${res.error}`);
+			console.error(`Failed to stop daemon: ${res.error}`);
 		}
 	} else if (daemon.pid) {
 		// Orphan daemon - kill directly
@@ -256,8 +258,8 @@ async function cmdDown() {
 			}
 
 			console.log('Daemon stopped');
-		} catch (err) {
-			console.error(`Failed to kill daemon: ${err}`);
+		} catch (err: unknown) {
+			console.error('Failed to kill daemon', err);
 		}
 	}
 }
@@ -279,7 +281,7 @@ async function cmdStatus() {
 		}
 	}
 
-	const status = daemon.status;
+	const {status} = daemon;
 
 	// Print status
 	console.log();
